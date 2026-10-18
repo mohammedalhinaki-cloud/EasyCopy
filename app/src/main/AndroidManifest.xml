@@ -27,7 +27,7 @@
             android:name=".EasyCopyTileService"
             android:exported="true"
             android:label="@string/tile_name"
-            android:icon="@android:drawable/ic_menu_copy"
+            android:icon="@drawable/ic_copy"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
