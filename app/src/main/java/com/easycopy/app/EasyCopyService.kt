@@ -6,6 +6,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Rect
+import android.os.SystemClock
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
@@ -25,12 +27,13 @@ class EasyCopyService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var overlay: View? = null
     private var windowManager: WindowManager? = null
+    private var lastMetaClick = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
         serviceInfo = (serviceInfo ?: AccessibilityServiceInfo()).apply {
-            eventTypes = AccessibilityEvent.TYPE_VIEW_LONG_CLICKED
+            eventTypes = AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or AccessibilityEvent.TYPE_VIEW_CLICKED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             notificationTimeout = 80
             flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -40,21 +43,60 @@ class EasyCopyService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) return
-        if (event.packageName?.toString() == packageName || event.isPassword) return
+        if (event == null || event.isPassword) return
+        if (event.packageName?.toString() == packageName) return
+        val isClick = event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
+        if (!isClick && event.eventType != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) return
         val node = event.source
-        if (node?.isPassword == true) return
-        // Allow Android's native selection controls to take priority.
+        if (node?.isPassword == true || node?.isEditable == true) return
+        if (isClick) {
+            // Never change taps in ordinary chats. Meta AI chat is opt-in by context.
+            if (!isMetaAiWhatsAppChat()) return
+            if (overlay != null || SystemClock.uptimeMillis() - lastMetaClick < 900L) return
+            val rect = Rect()
+            node?.getBoundsInScreen(rect)
+            val height = resources.displayMetrics.heightPixels
+            if (node == null || rect.isEmpty || rect.centerY() < height * 0.21f ||
+                rect.centerY() > height * 0.85f) return
+        }
+        // Let normal Android selection and copy keep working.
         if (node?.actionList?.any {
                 it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION ||
                 it.id == AccessibilityNodeInfo.ACTION_COPY
             } == true) return
         val extracted = readText(node, 0).ifBlank {
             event.text.joinToString(" ").trim()
-        }.ifBlank {
-            readText(node?.parent, 0)
+        }.ifBlank { readText(node?.parent, 0) }
+        if (extracted.isNotBlank() && extracted.length > 2) {
+            if (isClick) lastMetaClick = SystemClock.uptimeMillis()
+            displayText(extracted)
         }
-        if (extracted.isNotBlank()) displayText(extracted)
+    }
+
+    private fun isMetaAiWhatsAppChat(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val pkg = root.packageName?.toString().orEmpty()
+        if (pkg != "com.whatsapp" && pkg != "com.whatsapp.w4b") return false
+        val maxHeaderY = resources.displayMetrics.heightPixels * 0.23f
+        fun hasHeader(node: AccessibilityNodeInfo?, depth: Int): Boolean {
+            if (node == null || depth > 14) return false
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.top > maxHeaderY) return false
+            val name = node.text?.toString()?.trim().orEmpty()
+            val desc = node.contentDescription?.toString()?.trim().orEmpty()
+            val matches = listOf(name, desc).any {
+                it.equals("Meta AI", ignoreCase = true) ||
+                    it.startsWith("Meta AI,", ignoreCase = true) ||
+                    it.startsWith("Meta AI،", ignoreCase = true)
+            }
+            if (matches && bounds.height() > 0) return true
+            for (index in 0 until minOf(node.childCount, 70)) {
+                if (hasHeader(node.getChild(index), depth + 1)) return true
+            }
+            return false
+        }
+        return hasHeader(root, 0)
     }
 
     private fun readText(node: AccessibilityNodeInfo?, depth: Int): String {
@@ -152,7 +194,11 @@ class EasyCopyService : AccessibilityService() {
                 setTextColor(Color.rgb(27, 46, 66))
                 setPadding(0, 0, 0, dp(12))
             }
-            container.addView(title)
+            val header = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
             val edit = EditText(this).apply {
                 setText(text.take(10000))
                 setTextIsSelectable(true)
@@ -163,6 +209,39 @@ class EasyCopyService : AccessibilityService() {
                 setBackgroundColor(Color.rgb(245, 248, 251))
                 setPadding(dp(12), dp(10), dp(12), dp(10))
             }
+            val paste = Button(this).apply {
+                text = "لصق"
+                textSize = 13f
+                isAllCaps = false
+                minWidth = 0
+                minimumWidth = 0
+                minHeight = 0
+                minimumHeight = 0
+                setPadding(dp(8), 0, dp(8), 0)
+                contentDescription = "لصق النص المحفوظ في موضع المؤشر"
+                setOnClickListener {
+                    try {
+                        val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                        val value = clip?.takeIf { it.itemCount > 0 }
+                            ?.getItemAt(0)?.coerceToText(this@EasyCopyService)?.toString()
+                            .orEmpty()
+                        if (value.isBlank()) {
+                            Toast.makeText(this@EasyCopyService, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val start = edit.selectionStart.coerceAtLeast(0)
+                            val end = edit.selectionEnd.coerceAtLeast(0)
+                            val from = minOf(start, end).coerceAtMost(edit.length())
+                            val to = maxOf(start, end).coerceAtMost(edit.length())
+                            edit.text.replace(from, to, value)
+                            edit.setSelection((from + value.length).coerceAtMost(edit.length()))
+                        }
+                    } catch (_: SecurityException) {
+                        Toast.makeText(this@EasyCopyService, "تعذّر الوصول للحافظة", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            header.addView(paste, LinearLayout.LayoutParams(-2, dp(40)))
+            container.addView(header)
             container.addView(edit, LinearLayout.LayoutParams(-1, -2))
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL

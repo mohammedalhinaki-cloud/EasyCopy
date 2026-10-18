@@ -12,6 +12,17 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".ScreenshotCopyActivity"
+            android:exported="true"
+            android:label="Easy Copy — نسخ نص الصورة"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+        <activity
             android:name=".CopyEpisodeTitleActivity"
             android:exported="true"
             android:label="نسخ اسم الحلقة"
