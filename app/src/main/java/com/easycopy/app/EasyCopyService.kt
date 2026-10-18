@@ -42,14 +42,18 @@ class EasyCopyService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) return
         if (event.packageName?.toString() == packageName || event.isPassword) return
-        val node = event.source ?: return
-        if (node.isPassword) return
-        // Leave native selection UI alone when the clicked text already supports it.
-        if (node.actionList.any {
+        val node = event.source
+        if (node?.isPassword == true) return
+        // Allow Android's native selection controls to take priority.
+        if (node?.actionList?.any {
                 it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION ||
                 it.id == AccessibilityNodeInfo.ACTION_COPY
-            }) return
-        val extracted = readText(node, 0)
+            } == true) return
+        val extracted = readText(node, 0).ifBlank {
+            event.text.joinToString(" ").trim()
+        }.ifBlank {
+            readText(node?.parent, 0)
+        }
         if (extracted.isNotBlank()) displayText(extracted)
     }
 
@@ -68,11 +72,55 @@ class EasyCopyService : AccessibilityService() {
     }
 
     fun copyFromScreen() {
+        // When opened through Quick Settings, the system shade can obscure the source.
+        val shownPackage = rootInActiveWindow?.packageName?.toString().orEmpty()
+        if (shownPackage.contains("systemui", ignoreCase = true)) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            handler.postDelayed({ showScreenText() }, 550L)
+        } else {
+            showScreenText()
+        }
+    }
+
+    private fun showScreenText() {
+        val lines = LinkedHashSet<String>()
+        var visited = 0
+        var totalLength = 0
+
+        fun walk(node: AccessibilityNodeInfo?, depth: Int) {
+            if (node == null || depth > 28 || visited >= 3000 || totalLength >= 30000) return
+            visited++
+            if (node.isPassword || node.isEditable) return
+
+            val value = node.text?.toString()?.trim().orEmpty()
+            if (value.isNotBlank()) {
+                val v = value.take(12000)
+                if (lines.add(v)) totalLength += v.length
+            } else if (node.childCount == 0) {
+                // Custom views may expose text only as an accessibility label.
+                val description = node.contentDescription?.toString()?.trim().orEmpty()
+                if (description.isNotBlank()) {
+                    val v = description.take(12000)
+                    if (lines.add(v)) totalLength += v.length
+                }
+            }
+            for (i in 0 until minOf(node.childCount, 150)) {
+                if (totalLength >= 30000 || visited >= 3000) break
+                walk(node.getChild(i), depth + 1)
+            }
+        }
+
         val root = rootInActiveWindow
-        val text = readText(root, 0)
-        if (text.isBlank()) {
-            Toast.makeText(this, "التطبيق لا يتيح قراءة النص", Toast.LENGTH_SHORT).show()
-        } else displayText(text)
+        if (root?.packageName?.toString()?.contains("systemui", ignoreCase = true) == true) {
+            Toast.makeText(this, "أغلق شريط الإشعارات ثم أعد المحاولة", Toast.LENGTH_SHORT).show()
+            return
+        }
+        walk(root, 0)
+        if (lines.isEmpty()) {
+            Toast.makeText(this, "لا توجد نصوص مكشوفة لإمكانية الوصول في هذه الشاشة", Toast.LENGTH_LONG).show()
+        } else {
+            displayText(lines.joinToString("\n").take(30000))
+        }
     }
 
     private fun copy(value: String) {
