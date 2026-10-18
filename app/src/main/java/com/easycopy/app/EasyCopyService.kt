@@ -99,7 +99,7 @@ class EasyCopyService : AccessibilityService() {
                 elevation = dp(8).toFloat()
             }
             val title = TextView(this).apply {
-                text = "تحديد النص ونسخه"
+                this.text = "تحديد النص ونسخه"
                 textSize = 18f
                 setTextColor(Color.rgb(27, 46, 66))
                 setPadding(0, 0, 0, dp(12))
