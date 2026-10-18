@@ -2,6 +2,7 @@
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeViewLongClicked|typeViewClicked"
+    android:packageNames="au.com.shiftyjelly.pocketcasts,com.whatsapp,com.whatsapp.w4b"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="80"
     android:canRetrieveWindowContent="true"

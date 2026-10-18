@@ -3,5 +3,5 @@
     <string name="app_name">Easy Copy</string>
     <string name="service_name">Easy Copy – نسخ النصوص</string>
     <string name="tile_name">نسخ نص الشاشة</string>
-    <string name="service_description">يساعدك في نسخ النصوص التي توفرها التطبيقات لخدمات إمكانية الوصول. لا يلتقط الشاشة ولا يرسل البيانات للإنترنت. لا يعمل مع كل التطبيقات.</string>
+    <string name="service_description">يتعامل مع الضغط المطوّل في Pocket Casts، والنقر على رسائل Meta AI في واتساب فقط؛ لا يعالج النقرات في المحادثات العادية أو التطبيقات الأخرى. لا يرسل النصوص للإنترنت.</string>
 </resources>

@@ -34,6 +34,8 @@ class EasyCopyService : AccessibilityService() {
         current = this
         serviceInfo = (serviceInfo ?: AccessibilityServiceInfo()).apply {
             eventTypes = AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or AccessibilityEvent.TYPE_VIEW_CLICKED
+            // Skip event delivery from all other applications.
+            packageNames = arrayOf("au.com.shiftyjelly.pocketcasts", "com.whatsapp", "com.whatsapp.w4b")
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             notificationTimeout = 80
             flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -44,14 +46,25 @@ class EasyCopyService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.isPassword) return
-        if (event.packageName?.toString() == packageName) return
+        val sourceApp = event.packageName?.toString().orEmpty()
         val isClick = event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
-        if (!isClick && event.eventType != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) return
+        val isLongClick = event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED
+        // No automatic copying anywhere except the two requested integrations.
+        // Pocket Casts: keep long-press copying; normal taps remain untouched.
+        // WhatsApp: only handle taps inside the specific Meta AI conversation.
+        val isPocketCasts = sourceApp == "au.com.shiftyjelly.pocketcasts"
+        val isWhatsApp = sourceApp == "com.whatsapp" || sourceApp == "com.whatsapp.w4b"
+        if (isPocketCasts) {
+            if (!isLongClick) return
+        } else if (isWhatsApp) {
+            if (!isClick || !isMetaAiWhatsAppChat()) return
+        } else {
+            return
+        }
+
         val node = event.source
         if (node?.isPassword == true || node?.isEditable == true) return
         if (isClick) {
-            // Never change taps in ordinary chats. Meta AI chat is opt-in by context.
-            if (!isMetaAiWhatsAppChat()) return
             if (overlay != null || SystemClock.uptimeMillis() - lastMetaClick < 900L) return
             val rect = Rect()
             node?.getBoundsInScreen(rect)
