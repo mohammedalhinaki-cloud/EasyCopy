@@ -25,6 +25,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+      - name: Bundle offline Arabic and English OCR models
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets/tessdata
+          curl --fail --location --retry 4 --silent --show-error \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/ara.traineddata" \
+            -o app/src/main/assets/tessdata/ara.traineddata
+          curl --fail --location --retry 4 --silent --show-error \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/eng.traineddata" \
+            -o app/src/main/assets/tessdata/eng.traineddata
+          test "$(stat -c%s app/src/main/assets/tessdata/ara.traineddata)" -gt 100000
+          test "$(stat -c%s app/src/main/assets/tessdata/eng.traineddata)" -gt 100000
       - name: Assemble debug APK
         run: gradle --no-daemon :app:assembleDebug
       - name: Verify built APK

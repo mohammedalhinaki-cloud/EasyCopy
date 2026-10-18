@@ -17,20 +17,16 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.util.concurrent.Executors
 
 /**
- * Share a screenshot into Easy Copy to extract text on-device.
- * The bundled ML Kit model recognizes Latin-script text; no photo is uploaded.
+ * Screenshot share target. Reads text entirely on the device (Arabic + Latin).
+ * No network permission, no screenshots or recognized text are persisted.
  */
 class ScreenshotCopyActivity : Activity() {
     private lateinit var container: LinearLayout
     private lateinit var message: TextView
-    private val recognizer by lazy {
-        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    }
+    private val worker = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,7 +47,7 @@ class ScreenshotCopyActivity : Activity() {
         }
         container.addView(title)
         message = TextView(this).apply {
-            text = "جارٍ استخراج النص من الصورة داخل الجوال..."
+            text = "جارٍ استخراج النص العربي والإنجليزي داخل الجوال..."
             textSize = 16f
             setTextColor(Color.DKGRAY)
             setPadding(0, 0, 0, dp(18))
@@ -60,45 +56,46 @@ class ScreenshotCopyActivity : Activity() {
         container.addView(ProgressBar(this))
         scroll.addView(container)
         setContentView(scroll)
+
         val imageUri = if (Build.VERSION.SDK_INT >= 33) {
             intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
         } else {
             @Suppress("DEPRECATION")
-            (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
-        } ?: intent.clipData?.getItemAt(0)?.uri
+            intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+        } ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+
         if (intent.action != Intent.ACTION_SEND ||
             intent.type?.startsWith("image/") != true || imageUri == null) {
             showError("لم تصل صورة صالحة للمشاركة")
             return
         }
-        try {
-            val input = InputImage.fromFilePath(this, imageUri)
-            recognizer.process(input)
-                .addOnSuccessListener { result ->
-                    if (!isFinishing && !isDestroyed) showResult(result.text.trim())
+
+        worker.execute {
+            val result = try { OfflineOcr(applicationContext).recognize(imageUri) }
+            catch (_: OutOfMemoryError) { OcrResult("", null, "الصورة كبيرة جدًا للمعالجة") }
+            catch (error: Exception) {
+                OcrResult("", null, "تعذّر قراءة الصورة: ${error.localizedMessage ?: "خطأ غير معروف"}")
+            }
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    if (result.primary.isBlank()) showError(result.message)
+                    else showResult(result)
                 }
-                .addOnFailureListener {
-                    if (!isFinishing && !isDestroyed) showError("تعذّر قراءة النص من الصورة")
-                }
-        } catch (_: Exception) {
-            showError("لا يمكن فتح الصورة. حاول مشاركتها من تطبيق المعرض.")
+            }
         }
     }
 
     private fun clearProgress() {
-        if (container.childCount > 2) {
-            container.removeViews(2, container.childCount - 2)
-        }
+        if (container.childCount > 2) container.removeViews(2, container.childCount - 2)
     }
 
     private fun showError(reason: String) {
         clearProgress()
         message.text = reason
-        val close = Button(this).apply {
+        container.addView(Button(this).apply {
             text = "إغلاق"
             setOnClickListener { finish() }
-        }
-        container.addView(close)
+        })
     }
 
     private fun copy(value: String) {
@@ -108,16 +105,12 @@ class ScreenshotCopyActivity : Activity() {
         Toast.makeText(this, "تم نسخ النص", Toast.LENGTH_SHORT).show()
     }
 
-    private fun showResult(text: String) {
+    private fun showResult(result: OcrResult) {
         clearProgress()
-        if (text.isBlank()) {
-            showError("لم يُعثر على نص مدعوم. يعمل التعرف الحالي مع الحروف اللاتينية مثل الإنجليزية، وليس العربية.")
-            return
-        }
-        copy(text)
-        message.text = "نُسخ النص تلقائيًا. يمكنك تحديد جزء منه أو تصحيح الأخطاء ثم نسخه مرة أخرى."
+        copy(result.primary)
+        message.text = "${result.message}. تم نسخ النص تلقائيًا؛ راجعه وعدّله عند الحاجة."
         val editor = EditText(this).apply {
-            setText(text)
+            setText(result.primary)
             setTextIsSelectable(true)
             gravity = Gravity.TOP or Gravity.START
             textSize = 16f
@@ -128,6 +121,22 @@ class ScreenshotCopyActivity : Activity() {
             setTextColor(Color.BLACK)
         }
         container.addView(editor, LinearLayout.LayoutParams(-1, -2))
+        result.alternative?.takeIf { it.isNotBlank() }?.let { alternate ->
+            container.addView(Button(this).apply {
+                text = "عرض قراءة بديلة للنص"
+                textSize = 14f
+                setOnClickListener {
+                    val current = editor.text.toString()
+                    editor.setText(alternate)
+                    editor.setSelection(0)
+                    this.text = "عرض القراءة السابقة"
+                    this.setOnClickListener {
+                        editor.setText(current)
+                        editor.setSelection(0)
+                    }
+                }
+            })
+        }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun action(label: String, onClick: () -> Unit) {
             row.addView(Button(this).apply {
@@ -148,16 +157,15 @@ class ScreenshotCopyActivity : Activity() {
         action("نسخ الكل") { copy(editor.text.toString()) }
         action("إغلاق") { finish() }
         container.addView(row)
-        val note = TextView(this).apply {
-            this.text = "يعمل دون إنترنت؛ نتائج التعرف قد تحتوي أخطاء، وخصوصًا الأرقام والخطوط الصغيرة."
+        container.addView(TextView(this).apply {
+            text = "التعرّف محلي بالكامل ويدعم العربية والإنجليزية؛ قد تحتاج بعض الكلمات الصغيرة إلى التصحيح."
             textSize = 13f
             setTextColor(Color.GRAY)
-        }
-        container.addView(note)
+        })
     }
 
     override fun onDestroy() {
-        if (::container.isInitialized) recognizer.close()
+        worker.shutdown()
         super.onDestroy()
     }
 }
