@@ -210,7 +210,7 @@ class EasyCopyService : AccessibilityService() {
                 setPadding(dp(12), dp(10), dp(12), dp(10))
             }
             val paste = Button(this).apply {
-                text = "لصق"
+                this.text = "لصق"
                 textSize = 13f
                 isAllCaps = false
                 minWidth = 0

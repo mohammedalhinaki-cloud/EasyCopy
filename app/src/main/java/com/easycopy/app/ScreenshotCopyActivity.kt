@@ -149,7 +149,7 @@ class ScreenshotCopyActivity : Activity() {
         action("إغلاق") { finish() }
         container.addView(row)
         val note = TextView(this).apply {
-            text = "يعمل دون إنترنت؛ نتائج التعرف قد تحتوي أخطاء، وخصوصًا الأرقام والخطوط الصغيرة."
+            this.text = "يعمل دون إنترنت؛ نتائج التعرف قد تحتوي أخطاء، وخصوصًا الأرقام والخطوط الصغيرة."
             textSize = 13f
             setTextColor(Color.GRAY)
         }
