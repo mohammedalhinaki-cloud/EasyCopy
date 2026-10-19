@@ -121,21 +121,44 @@ class ScreenshotCopyActivity : Activity() {
             setTextColor(Color.BLACK)
         }
         container.addView(editor, LinearLayout.LayoutParams(-1, -2))
-        result.alternative?.takeIf { it.isNotBlank() }?.let { alternate ->
-            container.addView(Button(this).apply {
-                text = "عرض قراءة بديلة للنص"
+        val variants = result.choices.ifEmpty {
+            listOf("أفضل قراءة" to result.primary) +
+                listOfNotNull(result.alternative?.let { "قراءة بديلة" to it })
+        }
+        if (variants.size > 1) {
+            val optionsTitle = TextView(this).apply {
+                text = "اختيار طريقة القراءة"
                 textSize = 14f
-                setOnClickListener {
-                    val current = editor.text.toString()
-                    editor.setText(alternate)
-                    editor.setSelection(0)
-                    this.text = "عرض القراءة السابقة"
-                    this.setOnClickListener {
-                        editor.setText(current)
-                        editor.setSelection(0)
+                setTextColor(Color.DKGRAY)
+                setPadding(0, 16, 0, 4)
+            }
+            container.addView(optionsTitle)
+            val selector = android.widget.Spinner(this)
+            val adapter = android.widget.ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_item,
+                variants.map { it.first }
+            )
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            selector.adapter = adapter
+            selector.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+                override fun onItemSelected(
+                    parent: android.widget.AdapterView<*>?,
+                    view: android.view.View?,
+                    position: Int,
+                    id: Long
+                ) {
+                    if (position in variants.indices) {
+                        val value = variants[position].second
+                        if (editor.text.toString() != value) {
+                            editor.setText(value)
+                            editor.setSelection(0)
+                        }
                     }
                 }
-            })
+            }
+            container.addView(selector)
         }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun action(label: String, onClick: () -> Unit) {
@@ -158,7 +181,7 @@ class ScreenshotCopyActivity : Activity() {
         action("إغلاق") { finish() }
         container.addView(row)
         container.addView(TextView(this).apply {
-            text = "التعرّف محلي بالكامل ويدعم العربية والإنجليزية؛ قد تحتاج بعض الكلمات الصغيرة إلى التصحيح."
+            text = "التعرف يتم داخل الجهاز. اختر قراءة أخرى من القائمة إذا ظهرت أخطاء، وراجع النص قبل استخدامه."
             textSize = 13f
             setTextColor(Color.GRAY)
         })
