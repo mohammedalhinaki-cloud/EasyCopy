@@ -55,7 +55,6 @@ class OfflineOcr(private val context: Context) {
     fun recognize(uri: Uri): OcrResult {
         val original = loadBitmap(uri)
         val scaled = enlargeForText(original)
-        val cleaned = improveContrast(scaled)
         try {
             val english = readLatin(scaled)
             val dataFolder = setupTessdata()
@@ -97,7 +96,6 @@ class OfflineOcr(private val context: Context) {
                 choices = choices.map { it.key to it.value }
             )
         } finally {
-            if (cleaned !== scaled) cleaned.recycle()
             if (scaled !== original) scaled.recycle()
             original.recycle()
         }
@@ -210,7 +208,7 @@ class OfflineOcr(private val context: Context) {
         for (band in bands) {
             val candidates = all.filter { verticalOverlap(it.bounds, band) > .42f }.toMutableList()
             val bestOnPage = candidates.maxByOrNull { arabicQuality(it) }
-            if (bestOnPage == null || bestOnPage.confidence < 58f || arabicCount(bestOnPage.value) < 8) {
+            if (bestOnPage == null || bestOnPage.confidence < 72f || arabicCount(bestOnPage.value) < 8) {
                 try {
                     val clipped = Bitmap.createBitmap(image, band.left, band.top, band.width(), band.height())
                     try {
@@ -445,7 +443,9 @@ class OfflineOcr(private val context: Context) {
     }
 
     private fun enlargeForText(bitmap: Bitmap): Bitmap {
-        val factor = min(2.2f, min(2600f / bitmap.width, 4500f / bitmap.height)).coerceAtLeast(1f)
+        // Over-upscaling sharp screenshots destroys Arabic dots and letter joints.
+        // Keep native pixels for normal captures, enlarge only genuinely small text.
+        val factor = min(1.45f, min(1450f / bitmap.width, 2600f / bitmap.height)).coerceAtLeast(1f)
         if (factor < 1.12f) return bitmap
         return Bitmap.createScaledBitmap(bitmap, (bitmap.width * factor).toInt(), (bitmap.height * factor).toInt(), true)
     }
