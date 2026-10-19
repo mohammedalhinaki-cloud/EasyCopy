@@ -58,41 +58,35 @@ class OfflineOcr(private val context: Context) {
         try {
             val english = readLatin(scaled)
             val dataFolder = setupTessdata()
-            // Script-specific models are much more reliable than mixing Arabic
-            // and English into one Tesseract recognition run.
-            val script = readTesseract(dataFolder, scaled, "Arabic", TessBaseAPI.PageSegMode.PSM_AUTO, "script")
-            val arabicOnly = readTesseract(dataFolder, scaled, "ara", TessBaseAPI.PageSegMode.PSM_AUTO, "arabic")
+            // Preserve all full-page lines first. The previous version lost text
+            // when its handmade band detector did not find the exact same region.
+            val fullArabic = readTesseract(dataFolder, scaled, "ara", TessBaseAPI.PageSegMode.PSM_AUTO, "arabic-page")
+            val scriptArabic = readTesseract(dataFolder, scaled, "Arabic", TessBaseAPI.PageSegMode.PSM_AUTO, "arabic-script")
             val bands = locateTextBands(scaled)
-            val arabicLines = fillMissingLines(dataFolder, scaled, bands, script.lines, arabicOnly.lines)
-            val mixed = TessReading(arabicLines, script.confidence)
-            // Keep ML Kit Latin text ONLY if it lives in a different visual line;
-            // do not append invented English words over Arabic glyphs.
-            val joined = joinByPosition(english, arabicLines, emptyList())
-            val latinText = formatLines(english)
-            val mixedText = formatLines(arabicLines)
-            val arabicText = formatLines(arabicOnly.lines)
-            val combinedText = joined.trim()
-            val hasArabic = combinedText.count { isArabic(it) } >= 2 ||
-                arabicText.count { isArabic(it) } >= 4
-
+            val rescued = recoverAbsentBands(dataFolder, scaled, bands, fullArabic.lines + scriptArabic.lines)
+            val merged = mergeLinesSafely(fullArabic.lines + scriptArabic.lines + rescued)
+            val mixedText = formatLines(merged)
+            val pageText = fullArabic.text
+            val scriptText = scriptArabic.text
+            val englishText = formatLines(english)
+            val arabicLetters = (mixedText + pageText).count { isArabic(it) }
+            val hasArabic = arabicLetters >= 5
             val mainText = when {
                 hasArabic && mixedText.isNotBlank() -> mixedText
-                latinText.isNotBlank() -> latinText
-                combinedText.isNotBlank() -> combinedText
+                hasArabic && pageText.isNotBlank() -> pageText
+                englishText.isNotBlank() -> englishText
                 mixedText.isNotBlank() -> mixedText
-                else -> arabicText
+                else -> scriptText
             }
             val choices = linkedMapOf<String, String>()
-            if (mainText.isNotBlank()) choices["أفضل قراءة (تلقائية)"] = mainText
-            if (combinedText.isNotBlank() && combinedText != mainText) choices["دمج العربية والإنجليزية"] = combinedText
-            if (arabicText.isNotBlank() && arabicText != mainText) choices["قراءة عربية"] = arabicText
-            if (latinText.isNotBlank() && latinText != mainText) choices["قراءة إنجليزية"] = latinText
-            if (mixedText.isNotBlank() && mixedText != mainText) choices["قراءة مختلطة"] = mixedText
-
+            if (mainText.isNotBlank()) choices["الأفضل تلقائيًا"] = mainText
+            if (pageText.isNotBlank() && pageText != mainText) choices["الصفحة كاملة بالعربية"] = pageText
+            if (scriptText.isNotBlank() && scriptText != mainText) choices["النموذج العربي الثاني"] = scriptText
+            if (englishText.isNotBlank() && englishText != mainText) choices["الإنجليزية"] = englishText
             return OcrResult(
                 primary = mainText,
                 alternative = choices.values.firstOrNull { it != mainText },
-                message = if (hasArabic) "تم تحليل العربية والإنجليزية في مواقعها بالصورة" else "تم تحليل النصوص ومقارنتها بعدة طرق",
+                message = "استُخرج النص من قراءة الصفحة مع استعادة الأسطر غير المكتشفة",
                 choices = choices.map { it.key to it.value }
             )
         } finally {
@@ -183,6 +177,56 @@ class OfflineOcr(private val context: Context) {
             }
         }
         return bands.take(120)
+    }
+
+    private fun recoverAbsentBands(
+        dataPath: File,
+        image: Bitmap,
+        bands: List<Rect>,
+        existing: List<OcrLine>
+    ): List<OcrLine> {
+        val added = mutableListOf<OcrLine>()
+        for (band in bands) {
+            val overlap = (existing + added).any { line ->
+                verticalOverlap(line.bounds, band) > 0.47f &&
+                    line.bounds.width() > band.width() * 0.30f &&
+                    arabicCount(line.value) > 3
+            }
+            if (overlap || band.height() < 13) continue
+            try {
+                val crop = Bitmap.createBitmap(image, band.left, band.top, band.width(), band.height())
+                try {
+                    val readings = listOf(
+                        readTesseract(dataPath, crop, "ara", TessBaseAPI.PageSegMode.PSM_RAW_LINE, "recovered"),
+                        readTesseract(dataPath, crop, "Arabic", TessBaseAPI.PageSegMode.PSM_SINGLE_LINE, "recovered-script")
+                    ).flatMap { it.lines }
+                    val candidate = readings.filter { arabicCount(it.value) >= 4 }
+                        .maxByOrNull { arabicQuality(it) }
+                    if (candidate != null) {
+                        added.add(candidate.copy(bounds = Rect(band)))
+                    }
+                } finally { crop.recycle() }
+            } catch (_: Exception) { /* No partial result should replace the original page. */ }
+        }
+        return added
+    }
+
+    private fun mergeLinesSafely(lines: List<OcrLine>): List<OcrLine> {
+        val result = mutableListOf<OcrLine>()
+        for (line in lines.sortedBy { it.bounds.centerY() }) {
+            if (line.value.isBlank()) continue
+            val index = result.indexOfFirst {
+                verticalOverlap(it.bounds, line.bounds) > 0.60f &&
+                    kotlin.math.abs(it.bounds.centerY() - line.bounds.centerY()) <
+                    minOf(it.bounds.height(), line.bounds.height()) * .45f
+            }
+            if (index == -1) {
+                result.add(line)
+            } else if (arabicQuality(line) > arabicQuality(result[index]) + 4f) {
+                result[index] = line
+            }
+        }
+        return result.sortedBy { it.bounds.centerY() }
     }
 
     private fun verticalOverlap(a: Rect, b: Rect): Float {
