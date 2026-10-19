@@ -36,6 +36,11 @@ jobs:
           curl --fail --location --retry 4 --silent --show-error \
             "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/eng.traineddata" \
             -o app/src/main/assets/tessdata/eng.traineddata
+          # Official high-accuracy Arabic script model, not the small Latin OCR.
+          curl --fail --location --retry 4 --silent --show-error \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/script/Arabic.traineddata" \
+            -o app/src/main/assets/tessdata/Arabic.traineddata
+          test "$(stat -c%s app/src/main/assets/tessdata/Arabic.traineddata)" -gt 1000000
           test "$(stat -c%s app/src/main/assets/tessdata/ara.traineddata)" -gt 100000
           test "$(stat -c%s app/src/main/assets/tessdata/eng.traineddata)" -gt 100000
       - name: Assemble debug APK

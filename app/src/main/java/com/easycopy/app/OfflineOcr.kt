@@ -59,27 +59,25 @@ class OfflineOcr(private val context: Context) {
         try {
             val english = readLatin(scaled)
             val dataFolder = setupTessdata()
-            val bilingual = readTesseract(dataFolder, cleaned, "ara+eng", TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT, "mixed")
-            val arabicOnly = readTesseract(dataFolder, cleaned, "ara", TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT, "arabic")
-
-            // Multi-column layouts and UI labels often need a second segmentation
-            // mode; only spend the extra CPU if the mixed reading seems weak.
-            val secondPass = if (bilingual.lines.size < 3 || bilingual.confidence < 52f) {
-                readTesseract(dataFolder, scaled, "ara+eng", TessBaseAPI.PageSegMode.PSM_AUTO, "mixed-auto")
-            } else {
-                TessReading(emptyList(), 0f)
-            }
-            val mixed = chooseReading(bilingual, secondPass)
-            val joined = joinByPosition(english, mixed.lines, arabicOnly.lines)
+            // Script-specific models are much more reliable than mixing Arabic
+            // and English into one Tesseract recognition run.
+            val script = readTesseract(dataFolder, scaled, "Arabic", TessBaseAPI.PageSegMode.PSM_AUTO, "script")
+            val arabicOnly = readTesseract(dataFolder, scaled, "ara", TessBaseAPI.PageSegMode.PSM_AUTO, "arabic")
+            val bands = locateTextBands(scaled)
+            val arabicLines = fillMissingLines(dataFolder, scaled, bands, script.lines, arabicOnly.lines)
+            val mixed = TessReading(arabicLines, script.confidence)
+            // Keep ML Kit Latin text ONLY if it lives in a different visual line;
+            // do not append invented English words over Arabic glyphs.
+            val joined = joinByPosition(english, arabicLines, emptyList())
             val latinText = formatLines(english)
-            val mixedText = formatLines(mixed.lines)
+            val mixedText = formatLines(arabicLines)
             val arabicText = formatLines(arabicOnly.lines)
             val combinedText = joined.trim()
             val hasArabic = combinedText.count { isArabic(it) } >= 2 ||
                 arabicText.count { isArabic(it) } >= 4
 
             val mainText = when {
-                hasArabic && combinedText.isNotBlank() -> combinedText
+                hasArabic && mixedText.isNotBlank() -> mixedText
                 latinText.isNotBlank() -> latinText
                 combinedText.isNotBlank() -> combinedText
                 mixedText.isNotBlank() -> mixedText
@@ -103,6 +101,172 @@ class OfflineOcr(private val context: Context) {
             if (scaled !== original) scaled.recycle()
             original.recycle()
         }
+    }
+
+    /**
+     * Segment phone screenshots into horizontal text bands. It finds bright
+     * lettering against a dark UI (or dark lettering against a light UI).
+     * Segmentation preserves lines that whole-page OCR sometimes drops.
+     */
+    private fun locateTextBands(bitmap: Bitmap): List<Rect> {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 100 || h < 50) return emptyList()
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var low = 0
+        var count = 0
+        for (y in 0 until h step maxOf(1, h / 32)) {
+            for (x in 0 until w step maxOf(1, w / 32)) {
+                val p = pixels[y * w + x]
+                val lum = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
+                if (lum < 125) low++
+                count++
+            }
+        }
+        val darkBackground = low > count / 2
+        val left = maxOf(0, (w * .035f).toInt())
+        val right = minOf(w, (w * .965f).toInt())
+        val rowCount = IntArray(h)
+        val foreground = BooleanArray(w * h)
+        for (y in 0 until h) {
+            var total = 0
+            for (x in left until right) {
+                val pixel = pixels[y * w + x]
+                val lum = (Color.red(pixel) * 299 + Color.green(pixel) * 587 + Color.blue(pixel) * 114) / 1000
+                val matches = if (darkBackground) lum > 168 else lum < 94
+                if (matches) {
+                    foreground[y * w + x] = true
+                    total++
+                }
+            }
+            rowCount[y] = total
+        }
+        val minPixels = maxOf(10, w / 45)
+        val active = BooleanArray(h) { rowCount[it] >= minPixels }
+        // Join tiny holes caused by diacritics and dots, not adjacent lines.
+        var i = 1
+        while (i < h - 5) {
+            if (active[i - 1] && !active[i]) {
+                var next = i + 1
+                while (next < minOf(h, i + 6) && !active[next]) next++
+                if (next < minOf(h, i + 6)) {
+                    for (y in i until next) active[y] = true
+                    i = next
+                }
+            }
+            i++
+        }
+        val bands = mutableListOf<Rect>()
+        var y = 0
+        while (y < h) {
+            if (!active[y]) { y++; continue }
+            val begin = y
+            while (y < h && active[y]) y++
+            val end = y
+            if (end - begin < 13 || end - begin > h / 3) continue
+            var minX = right
+            var maxX = left
+            for (yy in begin until end) {
+                for (xx in left until right) {
+                    if (foreground[yy * w + xx]) {
+                        if (xx < minX) minX = xx
+                        if (xx > maxX) maxX = xx
+                    }
+                }
+            }
+            if (maxX > minX && maxX - minX > w / 15) {
+                bands.add(Rect(
+                    maxOf(0, minX - 16),
+                    maxOf(0, begin - 8),
+                    minOf(w, maxX + 17),
+                    minOf(h, end + 8)
+                ))
+            }
+        }
+        return bands.take(120)
+    }
+
+    private fun verticalOverlap(a: Rect, b: Rect): Float {
+        val overlap = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
+        return overlap / minOf(a.height(), b.height()).coerceAtLeast(1).toFloat()
+    }
+
+    /**
+     * Whole-page modes may skip individual lines (this happened to the user's
+     * Arabic screenshot). Re-run ONLY missing or very weak bands as single
+     * lines. Return one best Arabic result per visual band, no duplicates.
+     */
+    private fun fillMissingLines(
+        dataPath: File,
+        image: Bitmap,
+        bands: List<Rect>,
+        scriptLines: List<OcrLine>,
+        languageLines: List<OcrLine>
+    ): List<OcrLine> {
+        if (bands.isEmpty()) return scriptLines.ifEmpty { languageLines }
+        val all = (scriptLines + languageLines).filter { arabicCount(it.value) >= 2 }
+        val output = mutableListOf<OcrLine>()
+        for (band in bands) {
+            val candidates = all.filter { verticalOverlap(it.bounds, band) > .42f }.toMutableList()
+            val bestOnPage = candidates.maxByOrNull { arabicQuality(it) }
+            if (bestOnPage == null || bestOnPage.confidence < 58f || arabicCount(bestOnPage.value) < 8) {
+                try {
+                    val clipped = Bitmap.createBitmap(image, band.left, band.top, band.width(), band.height())
+                    try {
+                        // The RAW_LINE segmentation is useful for Arabic UI captions
+                        // rejected by automatic layout analysis.
+                        val recognized = readTesseract(
+                            dataPath, clipped, "Arabic",
+                            TessBaseAPI.PageSegMode.PSM_RAW_LINE, "line"
+                        )
+                        candidates.addAll(recognized.lines.map { line ->
+                            line.copy(bounds = Rect(
+                                line.bounds.left + band.left,
+                                line.bounds.top + band.top,
+                                line.bounds.right + band.left,
+                                line.bounds.bottom + band.top
+                            ))
+                        })
+                        if (candidates.none { arabicCount(it.value) >= 3 }) {
+                            val spare = readTesseract(
+                                dataPath, clipped, "ara",
+                                TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT, "line-fallback"
+                            )
+                            candidates.addAll(spare.lines.map { line ->
+                                line.copy(bounds = Rect(
+                                    line.bounds.left + band.left,
+                                    line.bounds.top + band.top,
+                                    line.bounds.right + band.left,
+                                    line.bounds.bottom + band.top
+                                ))
+                            })
+                        }
+                    } finally {
+                        clipped.recycle()
+                    }
+                } catch (_: Exception) {
+                    // Keep successful whole-page results if a crop fails.
+                }
+            }
+            val chosen = candidates.filter { arabicCount(it.value) >= 3 }
+                .maxByOrNull { arabicQuality(it) }
+            if (chosen != null) {
+                output.add(chosen.copy(bounds = band))
+            }
+        }
+        return if (output.isEmpty()) scriptLines.ifEmpty { languageLines } else output
+    }
+
+    private fun arabicQuality(line: OcrLine): Float {
+        val text = line.value.trim()
+        val arabicLetters = arabicCount(text)
+        val nonArabicLatin = latinCount(text)
+        val noisy = text.count { it == '|' || it == '\uFFFD' || it == '_' }
+        return line.confidence * .62f +
+            minOf(24, arabicLetters) * 1.0f +
+            minOf(55, text.length) * .08f -
+            nonArabicLatin * 1.9f - noisy * 3f
     }
 
     private fun isArabic(char: Char): Boolean =
@@ -242,7 +406,7 @@ class OfflineOcr(private val context: Context) {
         val root = File(context.filesDir, "tesseract")
         val data = File(root, "tessdata")
         if (!data.exists() && !data.mkdirs()) error("Could not prepare OCR data directory")
-        for (lang in listOf("ara", "eng")) {
+        for (lang in listOf("ara", "eng", "Arabic")) {
             val filename = "$lang.traineddata"
             val output = File(data, filename)
             if (!output.exists() || output.length() < 100_000L) {
